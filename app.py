@@ -7,21 +7,7 @@ import time
 
 # Configure page
 st.set_page_config(
-    
-    # Extract organization/facility name - the API uses 'organization_name' in basic
-    organization_name = ""
-    if result.get("enumeration_type") == "NPI-2":
-        # For organizations, look in basic.organization_name
-        organization_name = basic.get("organization_name", "") or basic.get("name", "") or ""
-    
-    # Extract provider name for individuals
-    provider_name = ""
-    if result.get("enumeration_type") == "NPI-1":
-        first_name = basic.get("first_name", "")
-        last_name = basic.get("last_name", "")
-        provider_name = f"{first_name} {last_name}".strip()
-    else:
-        provider_name = organization_namepage_title="NPI Registry Lookup",
+    page_title="NPI Registry Lookup",
     page_icon="🏥",
     layout="wide"
 )
@@ -31,6 +17,8 @@ st.title("🏥 NPPES NPI Registry Lookup Tool")
 st.markdown("""
 This application allows you to look up healthcare provider information using NPI (National Provider Identifier) numbers.
 Data is retrieved from the official CMS NPPES NPI Registry API.
+
+💡 **Note**: The API provides official, current provider data from the CMS database.
 """)
 
 # API Configuration
@@ -94,17 +82,11 @@ def extract_provider_info(api_response: Dict[str, Any], debug: bool = False) -> 
             st.write("DEBUG - Name field value:", basic.get("name", "Not found"))
             st.write("DEBUG - Enumeration type:", result.get("enumeration_type", "Not found"))
     
-    # Extract organization/facility name - try multiple possible field names
+    # Extract organization/facility name - the API uses 'organization_name' in basic
     organization_name = ""
     if result.get("enumeration_type") == "NPI-2":
-        # Try different possible field names for organization
-        organization_name = (
-            basic.get("organization_name") or 
-            basic.get("name") or 
-            basic.get("legal_business_name") or 
-            basic.get("org_name") or 
-            ""
-        )
+        # For organizations, look in basic.organization_name
+        organization_name = basic.get("organization_name", "") or basic.get("name", "") or ""
     
     # Extract provider name for individuals
     provider_name = ""
@@ -115,12 +97,12 @@ def extract_provider_info(api_response: Dict[str, Any], debug: bool = False) -> 
     else:
         provider_name = organization_name
     
-    # Extract addresses - note that the order can vary based on address_purpose
+    # Extract addresses - API returns MAILING first, then LOCATION (primary practice)
     primary_location = {}
     mailing_address = {}
     
     for address in addresses:
-        if address.get("address_purpose") == "LOCATION":
+        if address.get("address_purpose") == "LOCATION" and not primary_location:
             # This is the primary practice location
             primary_location = {
                 "address_1": address.get("address_1", ""),
@@ -132,7 +114,7 @@ def extract_provider_info(api_response: Dict[str, Any], debug: bool = False) -> 
                 "telephone": address.get("telephone_number", ""),
                 "fax": address.get("fax_number", "")
             }
-        elif address.get("address_purpose") == "MAILING":
+        elif address.get("address_purpose") == "MAILING" and not mailing_address:
             # This is the mailing address
             mailing_address = {
                 "address_1": address.get("address_1", ""),
@@ -140,7 +122,9 @@ def extract_provider_info(api_response: Dict[str, Any], debug: bool = False) -> 
                 "city": address.get("city", ""),
                 "state": address.get("state", ""),
                 "postal_code": address.get("postal_code", ""),
-                "country": address.get("country_name", "")
+                "country": address.get("country_name", ""),
+                "telephone": address.get("telephone_number", ""),
+                "fax": address.get("fax_number", "")
             }
     
     # Extract DBA names (Doing Business As)
@@ -310,7 +294,8 @@ with tab1:
     st.markdown("Enter a single NPI number for lookup")
     
     # Example NPI for testing
-    st.info("💡 Example NPI: **1275271462** (Shriners Hospitals for Children)")
+    with st.container():
+        st.caption("💡 Try this example: 1275271462 (Shriners Hospitals for Children)")
     
     single_npi = st.text_input("NPI Number (10 digits):", placeholder="1234567890")
     
@@ -382,24 +367,27 @@ with tab1:
                                     # Check for practice locations in the API response
                                     locations = (api_response['results'][0].get('practiceLocations', []) or 
                                                api_response['results'][0].get('practice_locations', []))
+                                    
+                                    # Show primary location
+                                    st.write("**Primary Location:**")
+                                    st.write(f"{provider_info['primary_practice_address']}")
+                                    st.write(f"{provider_info['primary_practice_city']}, {provider_info['primary_practice_state']} {provider_info['primary_practice_zip']}")
+                                    if provider_info['primary_practice_phone']:
+                                        st.write(f"Phone: {provider_info['primary_practice_phone']}")
+                                    st.write("---")
+                                    
+                                    # Show additional locations
                                     if locations:
-                                        # Show primary location first
-                                        st.write("**Primary Location:**")
-                                        st.write(f"{provider_info['primary_practice_address']}")
-                                        st.write(f"{provider_info['primary_practice_city']}, {provider_info['primary_practice_state']} {provider_info['primary_practice_zip']}")
-                                        if provider_info['primary_practice_phone']:
-                                            st.write(f"Phone: {provider_info['primary_practice_phone']}")
-                                        st.write("---")
-                                        
-                                        # Show additional locations
                                         st.write("**Additional Locations:**")
                                         for i, loc in enumerate(locations, 1):
-                                            st.write(f"**Location {i+1}:**")
-                                            st.write(f"{loc.get('address_1', '')} {loc.get('address_2', '')}".strip())
-                                            st.write(f"{loc.get('city', '')}, {loc.get('state', '')} {loc.get('postal_code', '')}")
-                                            if loc.get('telephone_number'):
-                                                st.write(f"Phone: {loc.get('telephone_number')}")
-                                            st.write("---")
+                                            address = f"{loc.get('address_1', '')} {loc.get('address_2', '')}".strip()
+                                            if address:  # Only show if there's an address
+                                                st.write(f"**Location {i+1}:**")
+                                                st.write(address)
+                                                st.write(f"{loc.get('city', '')}, {loc.get('state', '')} {loc.get('postal_code', '')}")
+                                                if loc.get('telephone_number'):
+                                                    st.write(f"Phone: {loc.get('telephone_number')}")
+                                                st.write("---")
                         else:
                             st.warning("No provider found with this NPI number.")
                     else:
@@ -592,7 +580,7 @@ with tab4:
                         # Process results
                         results = []
                         for result in data.get("results", []):
-                            provider_info = extract_provider_info({"results": [result]})
+                            provider_info = extract_provider_info({"results": [result]}, debug=False)
                             if provider_info:
                                 results.append(provider_info)
                         
@@ -642,6 +630,6 @@ st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
     Data source: NPPES NPI Registry API v2.1 | 
     Note: Issuance of an NPI does not ensure or validate that the Health Care Provider is Licensed or Credentialed<br>
-    💡 Tip: Enable Debug Mode in Display Settings to troubleshoot data extraction issues
+    💡 Tip: Enable Debug Mode in Display Settings if any fields appear blank
 </div>
 """, unsafe_allow_html=True)
