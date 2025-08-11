@@ -3,12 +3,25 @@ import pandas as pd
 import requests
 import json
 from typing import List, Dict, Any
-import io
 import time
 
 # Configure page
 st.set_page_config(
-    page_title="NPI Registry Lookup",
+    
+    # Extract organization/facility name - the API uses 'organization_name' in basic
+    organization_name = ""
+    if result.get("enumeration_type") == "NPI-2":
+        # For organizations, look in basic.organization_name
+        organization_name = basic.get("organization_name", "") or basic.get("name", "") or ""
+    
+    # Extract provider name for individuals
+    provider_name = ""
+    if result.get("enumeration_type") == "NPI-1":
+        first_name = basic.get("first_name", "")
+        last_name = basic.get("last_name", "")
+        provider_name = f"{first_name} {last_name}".strip()
+    else:
+        provider_name = organization_namepage_title="NPI Registry Lookup",
     page_icon="🏥",
     layout="wide"
 )
@@ -51,12 +64,13 @@ def query_npi_api(npi_number: str) -> Dict[str, Any]:
         st.error(f"Failed to parse API response for NPI {npi_number}: {str(e)}")
         return None
 
-def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
+def extract_provider_info(api_response: Dict[str, Any], debug: bool = False) -> Dict[str, Any]:
     """
     Extract relevant provider information from API response.
     
     Args:
         api_response: The raw API response
+        debug: Whether to print debug information
         
     Returns:
         Dictionary with extracted provider information
@@ -69,40 +83,75 @@ def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
     addresses = result.get("addresses", [])
     taxonomies = result.get("taxonomies", [])
     other_names = result.get("other_names", [])
+    # API can return either practiceLocations or practice_locations
+    practice_locations = result.get("practiceLocations", []) or result.get("practice_locations", [])
     
-    # Extract primary practice location (first address)
+    # Debug output
+    if debug:
+        st.write("DEBUG - Basic info keys:", list(basic.keys()) if basic else "No basic info")
+        if basic:
+            st.write("DEBUG - Organization name field value:", basic.get("organization_name", "Not found"))
+            st.write("DEBUG - Name field value:", basic.get("name", "Not found"))
+            st.write("DEBUG - Enumeration type:", result.get("enumeration_type", "Not found"))
+    
+    # Extract organization/facility name - try multiple possible field names
+    organization_name = ""
+    if result.get("enumeration_type") == "NPI-2":
+        # Try different possible field names for organization
+        organization_name = (
+            basic.get("organization_name") or 
+            basic.get("name") or 
+            basic.get("legal_business_name") or 
+            basic.get("org_name") or 
+            ""
+        )
+    
+    # Extract provider name for individuals
+    provider_name = ""
+    if result.get("enumeration_type") == "NPI-1":
+        first_name = basic.get("first_name", "")
+        last_name = basic.get("last_name", "")
+        provider_name = f"{first_name} {last_name}".strip()
+    else:
+        provider_name = organization_name
+    
+    # Extract addresses - note that the order can vary based on address_purpose
     primary_location = {}
-    if len(addresses) > 0:
-        primary = addresses[0]
-        primary_location = {
-            "address_1": primary.get("address_1", ""),
-            "address_2": primary.get("address_2", ""),
-            "city": primary.get("city", ""),
-            "state": primary.get("state", ""),
-            "postal_code": primary.get("postal_code", ""),
-            "country": primary.get("country_name", ""),
-            "telephone": primary.get("telephone_number", ""),
-            "fax": primary.get("fax_number", "")
-        }
-    
-    # Extract mailing address (second address if exists)
     mailing_address = {}
-    if len(addresses) > 1:
-        mailing = addresses[1]
-        mailing_address = {
-            "address_1": mailing.get("address_1", ""),
-            "address_2": mailing.get("address_2", ""),
-            "city": mailing.get("city", ""),
-            "state": mailing.get("state", ""),
-            "postal_code": mailing.get("postal_code", ""),
-            "country": mailing.get("country_name", "")
-        }
+    
+    for address in addresses:
+        if address.get("address_purpose") == "LOCATION":
+            # This is the primary practice location
+            primary_location = {
+                "address_1": address.get("address_1", ""),
+                "address_2": address.get("address_2", ""),
+                "city": address.get("city", ""),
+                "state": address.get("state", ""),
+                "postal_code": address.get("postal_code", ""),
+                "country": address.get("country_name", ""),
+                "telephone": address.get("telephone_number", ""),
+                "fax": address.get("fax_number", "")
+            }
+        elif address.get("address_purpose") == "MAILING":
+            # This is the mailing address
+            mailing_address = {
+                "address_1": address.get("address_1", ""),
+                "address_2": address.get("address_2", ""),
+                "city": address.get("city", ""),
+                "state": address.get("state", ""),
+                "postal_code": address.get("postal_code", ""),
+                "country": address.get("country_name", "")
+            }
     
     # Extract DBA names (Doing Business As)
     dba_names = []
     for other_name in other_names:
-        if other_name.get("type") == "3":  # Type 3 is typically DBA
-            dba_names.append(other_name.get("name", ""))
+        # Check if it's a DBA type (code "3" or type "Doing Business As")
+        if other_name.get("code") == "3" or other_name.get("type") == "Doing Business As":
+            # The field is 'organization_name' for organizations
+            name = other_name.get("organization_name", "") or other_name.get("name", "")
+            if name and name not in dba_names:
+                dba_names.append(name)
     
     # Extract primary taxonomy
     primary_taxonomy = ""
@@ -121,12 +170,12 @@ def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
     provider_info = {
         "npi": result.get("number", ""),
         "entity_type": "Individual" if result.get("enumeration_type") == "NPI-1" else "Organization",
-        "facility_name": basic.get("name", "") if result.get("enumeration_type") == "NPI-2" else "",
-        "name": basic.get("name", "") if result.get("enumeration_type") == "NPI-2" else f"{basic.get('first_name', '')} {basic.get('last_name', '')}".strip(),
+        "facility_name": organization_name,
+        "name": provider_name,
         "doing_business_as": ", ".join(dba_names) if dba_names else "",
         "first_name": basic.get("first_name", ""),
         "last_name": basic.get("last_name", ""),
-        "organization_name": basic.get("name", "") if result.get("enumeration_type") == "NPI-2" else "",
+        "organization_name": organization_name,
         "primary_taxonomy": primary_taxonomy,
         "taxonomy_description": taxonomy_description,
         "primary_practice_address": f"{primary_location.get('address_1', '')} {primary_location.get('address_2', '')}".strip(),
@@ -145,7 +194,8 @@ def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
         "authorized_official_first": basic.get("authorized_official_first_name", ""),
         "authorized_official_last": basic.get("authorized_official_last_name", ""),
         "authorized_official_title": basic.get("authorized_official_title_or_position", ""),
-        "authorized_official_phone": basic.get("authorized_official_telephone_number", "")
+        "authorized_official_phone": basic.get("authorized_official_telephone_number", ""),
+        "total_locations": len(practice_locations) + 1 if practice_locations else 1
     }
     
     return provider_info
@@ -194,7 +244,7 @@ def process_npi_list(npi_list: List[str], facility_focus: bool = True, show_all:
         else:
             api_response = query_npi_api(npi)
             if api_response:
-                provider_info = extract_provider_info(api_response)
+                provider_info = extract_provider_info(api_response, debug=False)
                 if provider_info:
                     results.append(provider_info)
                 else:
@@ -240,19 +290,28 @@ def process_npi_list(npi_list: List[str], facility_focus: bool = True, show_all:
 st.markdown("---")
 
 # Settings
-with st.expander("⚙️ Display Settings"):
-    facility_focus = st.checkbox("Facility Focus Mode", value=True, 
-                                help="Prioritize facility/organization information in results")
-    show_all_columns = st.checkbox("Show All Data Columns", value=False,
-                                  help="Display all available data fields in batch results")
+with st.expander("⚙️ Display Settings", expanded=False):
+    col1, col2 = st.columns(2)
+    with col1:
+        facility_focus = st.checkbox("Facility Focus Mode", value=True, 
+                                    help="Prioritize facility/organization information in results")
+        show_all_columns = st.checkbox("Show All Data Columns", value=False,
+                                      help="Display all available data fields in batch results")
+    with col2:
+        debug_mode = st.checkbox("Debug Mode", value=False,
+                               help="Show API response details for troubleshooting blank fields")
 
 # Input methods
 st.subheader("📝 Input NPI Numbers")
 
-tab1, tab2, tab3 = st.tabs(["Single NPI", "Multiple NPIs (Text)", "Upload CSV"])
+tab1, tab2, tab3, tab4 = st.tabs(["Single NPI", "Multiple NPIs (Text)", "Upload CSV", "Advanced Search"])
 
 with tab1:
     st.markdown("Enter a single NPI number for lookup")
+    
+    # Example NPI for testing
+    st.info("💡 Example NPI: **1275271462** (Shriners Hospitals for Children)")
+    
     single_npi = st.text_input("NPI Number (10 digits):", placeholder="1234567890")
     
     if st.button("Look Up Single NPI", type="primary"):
@@ -261,7 +320,12 @@ with tab1:
                 with st.spinner(f"Looking up NPI {single_npi}..."):
                     api_response = query_npi_api(single_npi)
                     if api_response:
-                        provider_info = extract_provider_info(api_response)
+                        # Show raw API response in debug mode
+                        if debug_mode:
+                            with st.expander("🔍 Raw API Response"):
+                                st.json(api_response)
+                        
+                        provider_info = extract_provider_info(api_response, debug_mode)
                         if provider_info:
                             st.success("✅ Provider found!")
                             
@@ -277,6 +341,8 @@ with tab1:
                                     st.write(f"**Facility/Organization:** {provider_info['facility_name']}")
                                     if provider_info['doing_business_as']:
                                         st.write(f"**Doing Business As:** {provider_info['doing_business_as']}")
+                                    if provider_info.get('total_locations', 1) > 1:
+                                        st.write(f"**Total Locations:** {provider_info.get('total_locations', 1)}")
                                 else:
                                     st.write(f"**Name:** {provider_info['name']}")
                                 
@@ -309,6 +375,31 @@ with tab1:
                                         st.write(f"**Title:** {provider_info['authorized_official_title']}")
                                     if provider_info['authorized_official_phone']:
                                         st.write(f"**Phone:** {provider_info['authorized_official_phone']}")
+                            
+                            # Show all practice locations if there are multiple
+                            if provider_info.get('total_locations', 1) > 1:
+                                with st.expander(f"📍 View All {provider_info.get('total_locations', 1)} Practice Locations"):
+                                    # Check for practice locations in the API response
+                                    locations = (api_response['results'][0].get('practiceLocations', []) or 
+                                               api_response['results'][0].get('practice_locations', []))
+                                    if locations:
+                                        # Show primary location first
+                                        st.write("**Primary Location:**")
+                                        st.write(f"{provider_info['primary_practice_address']}")
+                                        st.write(f"{provider_info['primary_practice_city']}, {provider_info['primary_practice_state']} {provider_info['primary_practice_zip']}")
+                                        if provider_info['primary_practice_phone']:
+                                            st.write(f"Phone: {provider_info['primary_practice_phone']}")
+                                        st.write("---")
+                                        
+                                        # Show additional locations
+                                        st.write("**Additional Locations:**")
+                                        for i, loc in enumerate(locations, 1):
+                                            st.write(f"**Location {i+1}:**")
+                                            st.write(f"{loc.get('address_1', '')} {loc.get('address_2', '')}".strip())
+                                            st.write(f"{loc.get('city', '')}, {loc.get('state', '')} {loc.get('postal_code', '')}")
+                                            if loc.get('telephone_number'):
+                                                st.write(f"Phone: {loc.get('telephone_number')}")
+                                            st.write("---")
                         else:
                             st.warning("No provider found with this NPI number.")
                     else:
@@ -420,11 +511,137 @@ with tab3:
         except Exception as e:
             st.error(f"Error reading CSV file: {str(e)}")
 
+with tab4:
+    st.markdown("Search for providers using advanced criteria")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        search_type = st.selectbox("Provider Type", 
+                                  ["All", "Organizations Only", "Individuals Only"])
+        org_name = st.text_input("Organization Name (supports wildcards *)", 
+                                placeholder="SHRINERS*")
+        first_name = st.text_input("First Name (Individual providers)", 
+                                  placeholder="John")
+        last_name = st.text_input("Last Name (Individual providers)", 
+                                 placeholder="Smith")
+    
+    with col2:
+        city = st.text_input("City", placeholder="Philadelphia")
+        state = st.text_input("State (2-letter code)", placeholder="PA", max_chars=2)
+        postal_code = st.text_input("Postal Code", placeholder="19140")
+        taxonomy_desc = st.text_input("Specialty/Taxonomy", 
+                                     placeholder="Orthopaedic Surgery")
+    
+    # Advanced options
+    with st.expander("Advanced Options"):
+        address_purpose = st.selectbox("Address Type", 
+                                      ["Any", "PRIMARY", "SECONDARY", "LOCATION", "MAILING"])
+        limit = st.slider("Max Results", 1, 200, 10)
+        
+    if st.button("Search Providers", type="primary"):
+        # Build search parameters
+        params = {
+            "version": API_VERSION,
+            "limit": limit
+        }
+        
+        # Add enumeration type if specified
+        if search_type == "Organizations Only":
+            params["enumeration_type"] = "NPI-2"
+        elif search_type == "Individuals Only":
+            params["enumeration_type"] = "NPI-1"
+        
+        # Add search criteria
+        if org_name:
+            params["organization_name"] = org_name
+        if first_name:
+            params["first_name"] = first_name
+        if last_name:
+            params["last_name"] = last_name
+        if city:
+            params["city"] = city
+        if state:
+            params["state"] = state.upper()
+        if postal_code:
+            params["postal_code"] = postal_code
+        if taxonomy_desc:
+            params["taxonomy_description"] = taxonomy_desc
+        if address_purpose != "Any":
+            params["address_purpose"] = address_purpose
+        
+        # Check if we have at least one search criterion
+        search_criteria = [org_name, first_name, last_name, city, state, postal_code, taxonomy_desc]
+        if any(search_criteria):
+            with st.spinner("Searching..."):
+                try:
+                    response = requests.get(API_BASE_URL, params=params, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if debug_mode:
+                        with st.expander("🔍 Search Parameters & Response"):
+                            st.write("Search params:", params)
+                            st.json(data)
+                    
+                    result_count = data.get("result_count", 0)
+                    
+                    if result_count > 0:
+                        st.success(f"Found {result_count} provider(s)")
+                        
+                        # Process results
+                        results = []
+                        for result in data.get("results", []):
+                            provider_info = extract_provider_info({"results": [result]})
+                            if provider_info:
+                                results.append(provider_info)
+                        
+                        if results:
+                            results_df = pd.DataFrame(results)
+                            
+                            # Apply column filtering based on settings
+                            if not show_all_columns:
+                                if facility_focus:
+                                    priority_cols = ['npi', 'entity_type', 'facility_name', 
+                                                   'doing_business_as', 'primary_practice_city', 
+                                                   'primary_practice_state', 'taxonomy_description']
+                                else:
+                                    priority_cols = ['npi', 'entity_type', 'name', 
+                                                   'primary_practice_city', 'primary_practice_state', 
+                                                   'taxonomy_description']
+                                available_cols = [col for col in priority_cols if col in results_df.columns]
+                                results_df = results_df[available_cols]
+                            
+                            st.dataframe(results_df, use_container_width=True)
+                            
+                            # Download button
+                            csv = results_df.to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download Results as CSV",
+                                data=csv,
+                                file_name="npi_search_results.csv",
+                                mime="text/csv"
+                            )
+                            
+                            if result_count > limit:
+                                st.info(f"Showing first {limit} results of {result_count} total. "
+                                       f"Increase 'Max Results' in Advanced Options to see more.")
+                    else:
+                        st.warning("No providers found matching your search criteria.")
+                        
+                except requests.exceptions.RequestException as e:
+                    st.error(f"Search failed: {str(e)}")
+                except Exception as e:
+                    st.error(f"Error processing results: {str(e)}")
+        else:
+            st.warning("Please enter at least one search criterion.")
+
 # Footer
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
     Data source: NPPES NPI Registry API v2.1 | 
-    Note: Issuance of an NPI does not ensure or validate that the Health Care Provider is Licensed or Credentialed
+    Note: Issuance of an NPI does not ensure or validate that the Health Care Provider is Licensed or Credentialed<br>
+    💡 Tip: Enable Debug Mode in Display Settings to troubleshoot data extraction issues
 </div>
 """, unsafe_allow_html=True)
