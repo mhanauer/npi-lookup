@@ -68,6 +68,7 @@ def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
     basic = result.get("basic", {})
     addresses = result.get("addresses", [])
     taxonomies = result.get("taxonomies", [])
+    other_names = result.get("other_names", [])
     
     # Extract primary practice location (first address)
     primary_location = {}
@@ -97,6 +98,12 @@ def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
             "country": mailing.get("country_name", "")
         }
     
+    # Extract DBA names (Doing Business As)
+    dba_names = []
+    for other_name in other_names:
+        if other_name.get("type") == "3":  # Type 3 is typically DBA
+            dba_names.append(other_name.get("name", ""))
+    
     # Extract primary taxonomy
     primary_taxonomy = ""
     taxonomy_description = ""
@@ -114,7 +121,9 @@ def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
     provider_info = {
         "npi": result.get("number", ""),
         "entity_type": "Individual" if result.get("enumeration_type") == "NPI-1" else "Organization",
+        "facility_name": basic.get("name", "") if result.get("enumeration_type") == "NPI-2" else "",
         "name": basic.get("name", "") if result.get("enumeration_type") == "NPI-2" else f"{basic.get('first_name', '')} {basic.get('last_name', '')}".strip(),
+        "doing_business_as": ", ".join(dba_names) if dba_names else "",
         "first_name": basic.get("first_name", ""),
         "last_name": basic.get("last_name", ""),
         "organization_name": basic.get("name", "") if result.get("enumeration_type") == "NPI-2" else "",
@@ -132,6 +141,7 @@ def extract_provider_info(api_response: Dict[str, Any]) -> Dict[str, Any]:
         "mailing_zip": mailing_address.get("postal_code", ""),
         "status": basic.get("status", ""),
         "last_updated": basic.get("last_updated", ""),
+        "enumeration_date": basic.get("enumeration_date", ""),
         "authorized_official_first": basic.get("authorized_official_first_name", ""),
         "authorized_official_last": basic.get("authorized_official_last_name", ""),
         "authorized_official_title": basic.get("authorized_official_title_or_position", ""),
@@ -153,12 +163,14 @@ def validate_npi(npi: str) -> bool:
     npi = npi.strip()
     return len(npi) == 10 and npi.isdigit()
 
-def process_npi_list(npi_list: List[str]) -> pd.DataFrame:
+def process_npi_list(npi_list: List[str], facility_focus: bool = True, show_all: bool = False) -> pd.DataFrame:
     """
     Process a list of NPI numbers and return results as a DataFrame.
     
     Args:
         npi_list: List of NPI numbers to process
+        facility_focus: Whether to prioritize facility information
+        show_all: Whether to show all columns
         
     Returns:
         DataFrame with provider information
@@ -202,10 +214,37 @@ def process_npi_list(npi_list: List[str]) -> pd.DataFrame:
     progress_bar.empty()
     status_text.empty()
     
-    return pd.DataFrame(results)
+    df = pd.DataFrame(results)
+    
+    # Reorder columns based on facility focus
+    if not df.empty and 'error' not in df.columns:
+        if facility_focus:
+            # Prioritize facility columns for organizations
+            priority_cols = ['npi', 'entity_type', 'facility_name', 'doing_business_as', 
+                           'primary_practice_city', 'primary_practice_state', 
+                           'primary_practice_zip', 'primary_practice_phone']
+        else:
+            priority_cols = ['npi', 'entity_type', 'name', 'primary_practice_city', 
+                           'primary_practice_state', 'primary_practice_zip', 
+                           'primary_practice_phone']
+        
+        if not show_all:
+            # Show only priority columns
+            available_cols = [col for col in priority_cols if col in df.columns]
+            other_cols = [col for col in df.columns if col not in available_cols]
+            df = df[available_cols + other_cols[:3]]  # Add a few more columns
+    
+    return df
 
 # Main app interface
 st.markdown("---")
+
+# Settings
+with st.expander("⚙️ Display Settings"):
+    facility_focus = st.checkbox("Facility Focus Mode", value=True, 
+                                help="Prioritize facility/organization information in results")
+    show_all_columns = st.checkbox("Show All Data Columns", value=False,
+                                  help="Display all available data fields in batch results")
 
 # Input methods
 st.subheader("📝 Input NPI Numbers")
@@ -232,9 +271,18 @@ with tab1:
                             with col1:
                                 st.markdown("### Basic Information")
                                 st.write(f"**NPI:** {provider_info['npi']}")
-                                st.write(f"**Name:** {provider_info['name']}")
+                                
+                                # Emphasize facility name for organizations
+                                if provider_info['entity_type'] == "Organization":
+                                    st.write(f"**Facility/Organization:** {provider_info['facility_name']}")
+                                    if provider_info['doing_business_as']:
+                                        st.write(f"**Doing Business As:** {provider_info['doing_business_as']}")
+                                else:
+                                    st.write(f"**Name:** {provider_info['name']}")
+                                
                                 st.write(f"**Entity Type:** {provider_info['entity_type']}")
                                 st.write(f"**Status:** {provider_info['status']}")
+                                st.write(f"**Enumeration Date:** {provider_info.get('enumeration_date', 'N/A')}")
                                 st.write(f"**Last Updated:** {provider_info['last_updated']}")
                                 
                                 if provider_info['taxonomy_description']:
@@ -279,10 +327,23 @@ with tab2:
             npi_list = [npi.strip() for npi in multi_npi_text.split('\n') if npi.strip()]
             if npi_list:
                 st.info(f"Processing {len(npi_list)} NPI numbers...")
-                results_df = process_npi_list(npi_list)
+                results_df = process_npi_list(npi_list, facility_focus, show_all_columns)
                 
                 if not results_df.empty:
                     st.success(f"✅ Processed {len(results_df)} NPI numbers")
+                    
+                    # Summary statistics for organizations
+                    if 'entity_type' in results_df.columns:
+                        org_count = len(results_df[results_df['entity_type'] == 'Organization'])
+                        ind_count = len(results_df[results_df['entity_type'] == 'Individual'])
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total NPIs", len(results_df))
+                        with col2:
+                            st.metric("Organizations/Facilities", org_count)
+                        with col3:
+                            st.metric("Individual Providers", ind_count)
                     
                     # Display results
                     st.dataframe(results_df, use_container_width=True)
@@ -326,10 +387,23 @@ with tab3:
             st.write(f"Found {len(npi_list)} NPI numbers in column '{npi_column}'")
             
             if st.button("Process Uploaded NPIs", type="primary"):
-                results_df = process_npi_list(npi_list)
+                results_df = process_npi_list(npi_list, facility_focus, show_all_columns)
                 
                 if not results_df.empty:
                     st.success(f"✅ Processed {len(results_df)} NPI numbers")
+                    
+                    # Summary statistics for organizations
+                    if 'entity_type' in results_df.columns:
+                        org_count = len(results_df[results_df['entity_type'] == 'Organization'])
+                        ind_count = len(results_df[results_df['entity_type'] == 'Individual'])
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Total NPIs", len(results_df))
+                        with col2:
+                            st.metric("Organizations/Facilities", org_count)
+                        with col3:
+                            st.metric("Individual Providers", ind_count)
                     
                     # Display results
                     st.dataframe(results_df, use_container_width=True)
